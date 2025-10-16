@@ -1,0 +1,400 @@
+@startuml
+title Senzu AI - Service Interface Definitions
+
+' ============================================
+' AUTH SERVICE
+' ============================================
+interface IAuthService {
+  + register(email: string, password: string, name: string): AuthResult
+  + login(email: string, password: string): AuthResult
+  + refreshToken(refreshToken: string): AuthResult
+  + logout(refreshToken: string): void
+  + verifyToken(accessToken: string): TokenPayload
+  + revokeAllTokens(userId: UUID): void
+}
+
+class AuthResult {
+  + accessToken: string
+  + refreshToken: string
+  + expiresIn: int
+  + user: UserDTO
+}
+
+class TokenPayload {
+  + userId: UUID
+  + email: string
+  + role: string
+  + exp: timestamp
+  + iat: timestamp
+}
+
+' ============================================
+' INFERENCE SERVICE
+' ============================================
+interface IInferenceService {
+  + predictForMatch(matchId: UUID, modelVersion?: string): PredictionResult[]
+  + batchPredict(matchIds: UUID[], modelVersion?: string): Map<UUID, PredictionResult[]>
+  + recomputePrediction(predictionId: UUID): PredictionResult
+  + getPredictionsByMatch(matchId: UUID, filters: PredictionFilters): PredictionResult[]
+  + calculateExpectedValue(probability: decimal, odds: decimal): decimal
+}
+
+class PredictionResult {
+  + id: UUID
+  + matchId: UUID
+  + modelRunId: UUID
+  + market: string
+  + outcome: string
+  + probability: decimal
+  + expectedValue: decimal
+  + confidenceIntervalLow: decimal
+  + confidenceIntervalHigh: decimal
+  + metadata: JSON
+  + predictedAt: timestamp
+}
+
+class PredictionFilters {
+  + market?: string
+  + minEV?: decimal
+  + predictedAfter?: timestamp
+}
+
+' ============================================
+' FEATURE SERVICE
+' ============================================
+interface IFeatureService {
+  + buildFeatures(matchId: UUID, oddsSnapshotId: UUID): FeatureVector
+  + getFeatureVector(featureVectorId: UUID): FeatureVector
+  + getLatestFeatures(matchId: UUID): FeatureVector
+  + computeFeature(featureName: string, matchData: MatchData): any
+  + validateFeatures(features: FeatureVector): ValidationResult
+  + getFeatureDefinitions(version: string): FeatureDefinition[]
+  + exportFeaturesForTraining(startDate: timestamp, endDate: timestamp): DataExport
+}
+
+class FeatureVector {
+  + id: UUID
+  + matchId: UUID
+  + oddsSnapshotId: UUID
+  + features: JSON
+  + featureVersion: string
+  + computedAt: timestamp
+}
+
+class FeatureDefinition {
+  + id: UUID
+  + name: string
+  + description: string
+  + version: string
+  + dataType: string
+  + calculationLogic: string
+  + isActive: boolean
+}
+
+class ValidationResult {
+  + isValid: boolean
+  + errors: string[]
+  + warnings: string[]
+}
+
+class DataExport {
+  + exportPath: string
+  + recordCount: int
+  + exportedAt: timestamp
+}
+
+' ============================================
+' MODEL SERVICE
+' ============================================
+interface IModelService {
+  + loadModel(modelVersion: string): Model
+  + getActiveModel(): Model
+  + infer(model: Model, features: FeatureVector): InferenceResult
+  + batchInfer(model: Model, features: FeatureVector[]): InferenceResult[]
+  + registerModel(modelMetadata: ModelMetadata, artifactPath: string): ModelRun
+  + activateModel(modelId: UUID): void
+  + deactivateModel(modelId: UUID): void
+  + getModelMetrics(modelId: UUID): ModelMetrics
+  + evaluateModel(modelId: UUID, testData: FeatureVector[]): EvaluationResult
+}
+
+class Model {
+  + id: UUID
+  + version: string
+  + modelType: string
+  + artifact: any
+  + hyperparameters: JSON
+  + loadedAt: timestamp
+}
+
+class InferenceResult {
+  + probabilities: Map<string, decimal>
+  + confidenceIntervals: Map<string, ConfidenceInterval>
+  + metadata: JSON
+}
+
+class ConfidenceInterval {
+  + low: decimal
+  + high: decimal
+  + level: decimal
+}
+
+class ModelMetadata {
+  + name: string
+  + version: string
+  + modelType: string
+  + hyperparameters: JSON
+  + trainingMetrics: JSON
+}
+
+class ModelMetrics {
+  + accuracy: decimal
+  + logLoss: decimal
+  + roi: decimal
+  + brier: decimal
+  + calibration: JSON
+}
+
+class EvaluationResult {
+  + metrics: ModelMetrics
+  + evaluationType: string
+  + periodStart: timestamp
+  + periodEnd: timestamp
+}
+
+' ============================================
+' DATA INGESTION SERVICE
+' ============================================
+interface IDataIngestionService {
+  + ingestMatchData(provider: string, sport: string): IngestionResult
+  + ingestOddsData(provider: string, matchIds: UUID[]): IngestionResult
+  + scheduleIngestionJob(jobConfig: JobConfig): UUID
+  + getIngestionJobStatus(jobId: UUID): JobStatus
+  + retryFailedRecords(jobId: UUID): IngestionResult
+  + validateIncomingData(data: JSON, schema: string): ValidationResult
+}
+
+class IngestionResult {
+  + jobId: UUID
+  + recordsProcessed: int
+  + recordsFailed: int
+  + status: string
+  + errors: string[]
+  + startedAt: timestamp
+  + completedAt: timestamp
+}
+
+class JobConfig {
+  + jobType: string
+  + provider: string
+  + schedule: string
+  + parameters: JSON
+}
+
+class JobStatus {
+  + jobId: UUID
+  + status: string
+  + progress: decimal
+  + currentPhase: string
+  + estimatedCompletion: timestamp
+}
+
+' ============================================
+' MATCH REPOSITORY
+' ============================================
+interface IMatchRepository {
+  + create(match: Match): Match
+  + update(matchId: UUID, updates: MatchUpdate): Match
+  + findById(matchId: UUID): Match?
+  + findByExternalId(externalId: string): Match?
+  + findByDateRange(startDate: timestamp, endDate: timestamp, filters: MatchFilters): Match[]
+  + findUpcoming(sport: string, limit: int): Match[]
+  + updateStatus(matchId: UUID, status: string): void
+  + updateScore(matchId: UUID, homeScore: int, awayScore: int): void
+}
+
+class Match {
+  + id: UUID
+  + sportId: UUID
+  + externalMatchId: string
+  + homeTeamId: UUID
+  + awayTeamId: UUID
+  + startAt: timestamp
+  + status: string
+  + homeScore?: int
+  + awayScore?: int
+  + metadata: JSON
+}
+
+class MatchUpdate {
+  + status?: string
+  + homeScore?: int
+  + awayScore?: int
+  + startAt?: timestamp
+  + metadata?: JSON
+}
+
+class MatchFilters {
+  + sportId?: UUID
+  + status?: string
+  + teamId?: UUID
+}
+
+' ============================================
+' ODDS REPOSITORY
+' ============================================
+interface IOddsRepository {
+  + create(oddsSnapshot: OddsSnapshot): OddsSnapshot
+  + bulkCreate(oddsSnapshots: OddsSnapshot[]): int
+  + findByMatch(matchId: UUID, filters: OddsFilters): OddsSnapshot[]
+  + findLatestByMatch(matchId: UUID, market: string): OddsSnapshot[]
+  + findByTimeRange(matchId: UUID, startTime: timestamp, endTime: timestamp): OddsSnapshot[]
+}
+
+class OddsSnapshot {
+  + id: UUID
+  + matchId: UUID
+  + provider: string
+  + market: string
+  + outcome: string
+  + odds: decimal
+  + timestamp: timestamp
+  + rawData: JSON
+}
+
+class OddsFilters {
+  + provider?: string
+  + market?: string
+  + outcome?: string
+  + latestOnly?: boolean
+}
+
+' ============================================
+' PREDICTION REPOSITORY
+' ============================================
+interface IPredictionRepository {
+  + create(prediction: Prediction): Prediction
+  + bulkCreate(predictions: Prediction[]): int
+  + findById(predictionId: UUID): Prediction?
+  + findByMatch(matchId: UUID, filters: PredictionFilters): Prediction[]
+  + findByModel(modelId: UUID, limit: int): Prediction[]
+  + findByEVThreshold(minEV: decimal, filters: PredictionFilters): Prediction[]
+  + update(predictionId: UUID, updates: PredictionUpdate): Prediction
+}
+
+class Prediction {
+  + id: UUID
+  + matchId: UUID
+  + modelRunId: UUID
+  + featureVectorId: UUID
+  + market: string
+  + outcome: string
+  + probability: decimal
+  + expectedValue: decimal
+  + confidenceIntervalLow: decimal
+  + confidenceIntervalHigh: decimal
+  + metadata: JSON
+  + predictedAt: timestamp
+}
+
+class PredictionUpdate {
+  + metadata?: JSON
+}
+
+' ============================================
+' FEATURE REPOSITORY
+' ============================================
+interface IFeatureRepository {
+  + create(featureVector: FeatureVector): FeatureVector
+  + findById(featureVectorId: UUID): FeatureVector?
+  + findByMatch(matchId: UUID): FeatureVector[]
+  + findLatestByMatch(matchId: UUID): FeatureVector?
+  + exportToDataLake(startDate: timestamp, endDate: timestamp): string
+  + bulkCreate(featureVectors: FeatureVector[]): int
+}
+
+' ============================================
+' CACHE SERVICE
+' ============================================
+interface ICacheService {
+  + get<T>(key: string): T?
+  + set<T>(key: string, value: T, ttl: int): void
+  + delete(key: string): void
+  + exists(key: string): boolean
+  + invalidatePattern(pattern: string): int
+  + warmCache(keys: string[], dataFetcher: Function): void
+}
+
+' ============================================
+' NOTIFICATION SERVICE (Future)
+' ============================================
+interface INotificationService {
+  + sendPredictionAlert(userId: UUID, prediction: Prediction): void
+  + sendModelUpdateNotification(modelId: UUID, recipients: UUID[]): void
+  + sendIngestionFailureAlert(jobId: UUID, error: string): void
+}
+
+' ============================================
+' RELATIONSHIPS
+' ============================================
+
+IInferenceService ..> IFeatureService : uses
+IInferenceService ..> IModelService : uses
+IInferenceService ..> IPredictionRepository : uses
+IInferenceService ..> ICacheService : uses
+
+IFeatureService ..> IMatchRepository : uses
+IFeatureService ..> IOddsRepository : uses
+IFeatureService ..> IFeatureRepository : uses
+
+IModelService ..> ICacheService : uses
+
+IDataIngestionService ..> IMatchRepository : uses
+IDataIngestionService ..> IOddsRepository : uses
+
+note top of IAuthService
+  **Responsibilities:**
+  - User registration & authentication
+  - JWT token generation & validation
+  - Token refresh & revocation
+  - Session management
+end note
+
+note top of IInferenceService
+  **Responsibilities:**
+  - Orchestrate prediction workflow
+  - Call Feature Service for vectors
+  - Call Model Service for inference
+  - Calculate EV from probabilities & odds
+  - Store predictions
+  - Cache management
+end note
+
+note top of IFeatureService
+  **Responsibilities:**
+  - Build feature vectors from match data
+  - Feature engineering logic
+  - Feature versioning
+  - Export features to data lake
+  - Validate feature integrity
+end note
+
+note top of IModelService
+  **Responsibilities:**
+  - Load model artifacts from storage
+  - Run inference on feature vectors
+  - Model versioning & activation
+  - Model evaluation & metrics
+  - Warm models in cache/memory
+end note
+
+note top of IDataIngestionService
+  **Responsibilities:**
+  - Fetch data from external APIs
+  - Parse & validate incoming data
+  - Upsert matches & odds
+  - Schedule recurring jobs
+  - Error handling & retry logic
+end note
+
+@enduml

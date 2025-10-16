@@ -1,0 +1,54 @@
+@startuml
+title AI-Powered Sports Prediction Dashboard - Deployment
+
+node "User Devices" as UserClient {
+  [Web / Mobile Dashboard]
+}
+
+node "Cloud Environment (AWS/GCP)" as Cloud {
+  
+  folder "API / Web Layer" {
+    component "API Gateway / Web API" as API
+    component "Auth Service" as Auth
+  }
+  
+  folder "Backend Services" {
+    component "Inference Service" as Inference
+    component "Feature Service" as Feature
+    component "Model Service" as Model
+    component "Data Ingestion Service" as Ingest
+  }
+
+  folder "Persistence & Cache" {
+    database "PostgreSQL / RDS" as DB
+    database "S3 / Data Lake" as DataLake
+    queue "Redis Cache" as Cache
+  }
+
+  folder "ML Pipeline" {
+    component "Training Pipeline (Airflow/Prefect)" as Trainer
+    component "Model Registry / MLflow" as MLflow
+  }
+}
+
+node "External APIs" as External {
+  [Sports Data Providers]
+}
+
+' Connections
+UserClient --> API : HTTP(S) Requests
+API --> Auth : Authenticate
+API --> Inference : Prediction Requests
+Inference --> Feature : Feature Vector Build
+Feature --> DB : Retrieve historical features
+Inference --> Model : Load model & Infer
+Model --> MLflow : Load model artifacts
+Inference --> Cache : Cache prediction
+Inference --> DB : Save predictions
+Ingest --> External : Fetch sports data
+Ingest --> DB : Save matches & odds
+Trainer --> DataLake : Read historical features
+Trainer --> Model : Train & evaluate models
+Trainer --> MLflow : Register new model versions
+
+@enduml

@@ -1,0 +1,30 @@
+@startuml
+title Prediction Request Flow
+
+actor User
+participant API as "API Gateway / Controller"
+participant Auth as "Auth Service"
+participant Inference as "Inference Service"
+participant Feature as "Feature Service"
+participant Model as "Model Service"
+participant PredRepo as "Prediction Repository"
+participant Cache as "Redis Cache"
+
+User -> API : GET /matches/{id}/predictions
+API -> Auth : Verify token
+API -> Cache : Check cached prediction
+alt Cache hit
+  Cache --> API : Return cached prediction
+  API --> User : 200 OK JSON
+else Cache miss
+  API -> Inference : InferForMatch(matchId)
+  Inference -> Feature : BuildFeatures(matchId)
+  Feature --> Inference : FeatureVector
+  Inference -> Model : Infer(featureVector)
+  Model --> Inference : probability + EV
+  Inference -> PredRepo : Save prediction
+  Inference -> Cache : Store prediction
+  Inference --> API : Prediction
+  API --> User : 200 OK JSON
+end
+@enduml

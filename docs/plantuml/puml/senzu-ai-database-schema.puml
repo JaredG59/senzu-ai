@@ -1,0 +1,316 @@
+@startuml
+title Senzu AI - Database Schema (ER Diagram)
+
+' Styling
+skinparam linetype ortho
+hide circle
+skinparam roundcorner 5
+
+' ============================================
+' USER & AUTH
+' ============================================
+
+entity "users" as users {
+  * **id**: UUID <<PK>>
+  --
+  * email: VARCHAR(255) <<UNIQUE>>
+  * password_hash: VARCHAR(255)
+  * name: VARCHAR(255)
+  * role: VARCHAR(50)
+  * is_active: BOOLEAN
+  * created_at: TIMESTAMP
+  * updated_at: TIMESTAMP
+  --
+  INDEX idx_users_email (email)
+}
+
+entity "refresh_tokens" as refresh_tokens {
+  * **id**: UUID <<PK>>
+  --
+  * user_id: UUID <<FK>>
+  * token_hash: VARCHAR(255)
+  * expires_at: TIMESTAMP
+  * created_at: TIMESTAMP
+  * revoked_at: TIMESTAMP
+  --
+  INDEX idx_refresh_tokens_user_id (user_id)
+  INDEX idx_refresh_tokens_expires_at (expires_at)
+}
+
+' ============================================
+' SPORTS DOMAIN
+' ============================================
+
+entity "sports" as sports {
+  * **id**: UUID <<PK>>
+  --
+  * code: VARCHAR(50) <<UNIQUE>>
+  * name: VARCHAR(255)
+  * created_at: TIMESTAMP
+  --
+  INDEX idx_sports_code (code)
+}
+
+entity "teams" as teams {
+  * **id**: UUID <<PK>>
+  --
+  * sport_id: UUID <<FK>>
+  * name: VARCHAR(255)
+  * external_id: VARCHAR(255) <<UNIQUE>>
+  * metadata: JSONB
+  * created_at: TIMESTAMP
+  * updated_at: TIMESTAMP
+  --
+  INDEX idx_teams_sport_id (sport_id)
+  INDEX idx_teams_external_id (external_id)
+}
+
+entity "matches" as matches {
+  * **id**: UUID <<PK>>
+  --
+  * sport_id: UUID <<FK>>
+  * external_match_id: VARCHAR(255) <<UNIQUE>>
+  * home_team_id: UUID <<FK>>
+  * away_team_id: UUID <<FK>>
+  * start_at: TIMESTAMP
+  * status: VARCHAR(50)
+  * home_score: INTEGER
+  * away_score: INTEGER
+  * metadata: JSONB
+  * created_at: TIMESTAMP
+  * updated_at: TIMESTAMP
+  --
+  INDEX idx_matches_sport_id (sport_id)
+  INDEX idx_matches_home_team_id (home_team_id)
+  INDEX idx_matches_away_team_id (away_team_id)
+  INDEX idx_matches_start_at (start_at)
+  INDEX idx_matches_status (status)
+  INDEX idx_matches_external_id (external_match_id)
+}
+
+' ============================================
+' ODDS DATA
+' ============================================
+
+entity "odds_snapshots" as odds_snapshots {
+  * **id**: UUID <<PK>>
+  --
+  * match_id: UUID <<FK>>
+  * provider: VARCHAR(100)
+  * market: VARCHAR(100)
+  * outcome: VARCHAR(100)
+  * odds: DECIMAL(10, 4)
+  * timestamp: TIMESTAMP
+  * raw_data: JSONB
+  * created_at: TIMESTAMP
+  --
+  INDEX idx_odds_match_id (match_id)
+  INDEX idx_odds_provider (provider)
+  INDEX idx_odds_market (market)
+  INDEX idx_odds_timestamp (timestamp)
+  INDEX idx_odds_composite (match_id, provider, market, timestamp)
+  --
+  PARTITION BY RANGE (timestamp)
+}
+
+' ============================================
+' FEATURE STORE
+' ============================================
+
+entity "feature_vectors" as feature_vectors {
+  * **id**: UUID <<PK>>
+  --
+  * match_id: UUID <<FK>>
+  * odds_snapshot_id: UUID <<FK>>
+  * features: JSONB
+  * feature_version: VARCHAR(50)
+  * computed_at: TIMESTAMP
+  * created_at: TIMESTAMP
+  --
+  INDEX idx_features_match_id (match_id)
+  INDEX idx_features_odds_snapshot_id (odds_snapshot_id)
+  INDEX idx_features_computed_at (computed_at)
+  INDEX idx_features_version (feature_version)
+}
+
+entity "feature_definitions" as feature_definitions {
+  * **id**: UUID <<PK>>
+  --
+  * name: VARCHAR(255) <<UNIQUE>>
+  * description: TEXT
+  * version: VARCHAR(50)
+  * calculation_logic: TEXT
+  * data_type: VARCHAR(50)
+  * is_active: BOOLEAN
+  * created_at: TIMESTAMP
+  * updated_at: TIMESTAMP
+  --
+  INDEX idx_feature_defs_name (name)
+  INDEX idx_feature_defs_version (version)
+}
+
+' ============================================
+' MODEL MANAGEMENT
+' ============================================
+
+entity "model_runs" as model_runs {
+  * **id**: UUID <<PK>>
+  --
+  * name: VARCHAR(255)
+  * version: VARCHAR(100) <<UNIQUE>>
+  * model_type: VARCHAR(100)
+  * artifact_path: VARCHAR(500)
+  * hyperparameters: JSONB
+  * metrics: JSONB
+  * is_active: BOOLEAN
+  * deployed_at: TIMESTAMP
+  * created_at: TIMESTAMP
+  * updated_at: TIMESTAMP
+  --
+  INDEX idx_model_runs_version (version)
+  INDEX idx_model_runs_is_active (is_active)
+  INDEX idx_model_runs_deployed_at (deployed_at)
+}
+
+entity "model_evaluations" as model_evaluations {
+  * **id**: UUID <<PK>>
+  --
+  * model_run_id: UUID <<FK>>
+  * evaluation_type: VARCHAR(100)
+  * metrics: JSONB
+  * evaluation_period_start: TIMESTAMP
+  * evaluation_period_end: TIMESTAMP
+  * created_at: TIMESTAMP
+  --
+  INDEX idx_model_eval_model_id (model_run_id)
+  INDEX idx_model_eval_type (evaluation_type)
+}
+
+' ============================================
+' PREDICTIONS
+' ============================================
+
+entity "predictions" as predictions {
+  * **id**: UUID <<PK>>
+  --
+  * match_id: UUID <<FK>>
+  * model_run_id: UUID <<FK>>
+  * feature_vector_id: UUID <<FK>>
+  * market: VARCHAR(100)
+  * outcome: VARCHAR(100)
+  * probability: DECIMAL(10, 6)
+  * expected_value: DECIMAL(10, 6)
+  * confidence_interval_low: DECIMAL(10, 6)
+  * confidence_interval_high: DECIMAL(10, 6)
+  * metadata: JSONB
+  * predicted_at: TIMESTAMP
+  * created_at: TIMESTAMP
+  --
+  INDEX idx_predictions_match_id (match_id)
+  INDEX idx_predictions_model_id (model_run_id)
+  INDEX idx_predictions_predicted_at (predicted_at)
+  INDEX idx_predictions_market (market)
+  INDEX idx_predictions_composite (match_id, model_run_id, market)
+  --
+  PARTITION BY RANGE (predicted_at)
+}
+
+entity "backtest_results" as backtest_results {
+  * **id**: UUID <<PK>>
+  --
+  * model_run_id: UUID <<FK>>
+  * backtest_period_start: TIMESTAMP
+  * backtest_period_end: TIMESTAMP
+  * total_predictions: INTEGER
+  * accuracy: DECIMAL(10, 6)
+  * roi: DECIMAL(10, 6)
+  * sharpe_ratio: DECIMAL(10, 6)
+  * metrics: JSONB
+  * created_at: TIMESTAMP
+  --
+  INDEX idx_backtest_model_id (model_run_id)
+  INDEX idx_backtest_period_start (backtest_period_start)
+}
+
+' ============================================
+' DATA INGESTION TRACKING
+' ============================================
+
+entity "ingestion_jobs" as ingestion_jobs {
+  * **id**: UUID <<PK>>
+  --
+  * job_type: VARCHAR(100)
+  * provider: VARCHAR(100)
+  * status: VARCHAR(50)
+  * started_at: TIMESTAMP
+  * completed_at: TIMESTAMP
+  * records_processed: INTEGER
+  * records_failed: INTEGER
+  * error_log: TEXT
+  * metadata: JSONB
+  * created_at: TIMESTAMP
+  --
+  INDEX idx_ingestion_jobs_status (status)
+  INDEX idx_ingestion_jobs_started_at (started_at)
+  INDEX idx_ingestion_jobs_provider (provider)
+}
+
+' ============================================
+' RELATIONSHIPS
+' ============================================
+
+users ||--o{ refresh_tokens : "has"
+
+sports ||--o{ teams : "has"
+sports ||--o{ matches : "has"
+
+teams ||--o{ matches : "home_team"
+teams ||--o{ matches : "away_team"
+
+matches ||--o{ odds_snapshots : "has"
+matches ||--o{ feature_vectors : "generates"
+matches ||--o{ predictions : "predicts"
+
+odds_snapshots ||--o| feature_vectors : "produces"
+
+feature_vectors ||--o{ predictions : "used_by"
+
+model_runs ||--o{ predictions : "produces"
+model_runs ||--o{ model_evaluations : "evaluated_by"
+model_runs ||--o{ backtest_results : "tested_in"
+
+' ============================================
+' NOTES
+' ============================================
+
+note right of odds_snapshots
+  **Partitioning Strategy:**
+  - Partition by month on timestamp
+  - Retain 24 months of data
+  - Archive older data to S3
+
+  **Estimated Growth:**
+  - 10K matches/day
+  - 100 odds updates/match
+  - ~1M rows/day
+end note
+
+note right of predictions
+  **Partitioning Strategy:**
+  - Partition by month on predicted_at
+  - Retain 12 months of hot data
+  - Archive older data to S3
+
+  **Cache Strategy:**
+  - Cache predictions for 5 minutes
+  - Invalidate on new odds data
+end note
+
+note right of feature_vectors
+  **Storage Strategy:**
+  - Keep recent 6 months in DB
+  - Export to S3 Data Lake monthly
+  - Used for model retraining
+end note
+
+@enduml

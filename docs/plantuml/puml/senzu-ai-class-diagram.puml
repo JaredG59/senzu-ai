@@ -1,0 +1,79 @@
+@startuml
+title AI-Powered Sports Prediction Dashboard - Domain Model
+
+package Domain {
+  class User {
+    +UUID id
+    +string email
+    +string name
+    +Role role
+    +DateTime createdAt
+  }
+
+  class Sport {
+    +UUID id
+    +string code
+    +string name
+  }
+
+  class Team {
+    +UUID id
+    +string name
+    +string externalId
+  }
+
+  class Match {
+    +UUID id
+    +string externalMatchId
+    +DateTime startAt
+    +MatchStatus status
+    +Team homeTeam
+    +Team awayTeam
+  }
+
+  class OddsSnapshot {
+    +UUID id
+    +string provider
+    +string market
+    +string outcome
+    +decimal odds
+    +DateTime timestamp
+    +JSON raw
+  }
+
+  class FeatureVector {
+    +UUID id
+    +JSON features
+  }
+
+  class ModelRun {
+    +UUID id
+    +string name
+    +string version
+    +JSON metadata
+    +DateTime createdAt
+  }
+
+  class Prediction {
+    +UUID id
+    +decimal probability
+    +decimal expectedValue
+    +JSON metadata
+  }
+
+  class BacktestResult {
+    +UUID id
+    +JSON metrics
+    +DateTime createdAt
+  }
+}
+
+' Relationships
+Match "1" -- "2" Team : home/away
+Match "1" -- "0..*" OddsSnapshot : has
+OddsSnapshot "1" -- "1" FeatureVector : produced
+FeatureVector "1" -- "0..*" Prediction : used-by
+ModelRun "1" -- "0..*" Prediction : produces
+BacktestResult "1" -- "0..*" ModelRun : evaluates
+
+@enduml

@@ -1,0 +1,251 @@
+@startuml
+title Senzu AI - Feature Engineering Pipeline
+
+' ============================================
+' MAIN FEATURE PIPELINE FLOW
+' ============================================
+
+start
+
+:Feature Computation Triggered;
+note right
+  **Trigger Sources:**
+  1. Prediction request (real-time)
+  2. New match ingested (batch)
+  3. Odds updated (event-driven)
+  4. Scheduled batch job (daily)
+  5. Model training export (bulk)
+end note
+
+:Receive Request;
+note right
+  Input Parameters:
+  - match_id: UUID
+  - odds_snapshot_id: UUID (optional)
+  - feature_version: string
+end note
+
+partition "Data Retrieval Phase" {
+  :Fetch Match Data;
+  note right
+    Query Match Repository:
+    - home_team_id, away_team_id
+    - start_at, sport_id
+    - current status
+    - metadata
+  end note
+
+  :Fetch Team Data;
+  note right
+    For both home & away teams:
+    - Team name, external_id
+    - Team metadata
+  end note
+
+  if (odds_snapshot_id provided?) then (yes)
+    :Fetch Specific Odds Snapshot;
+  else (no)
+    :Fetch Latest Odds Snapshots;
+    note right
+      Get most recent odds for:
+      - Moneyline
+      - Spread
+      - Totals (Over/Under)
+    end note
+  endif
+
+  :Fetch Historical Match Data;
+  note right
+    **Historical lookback queries:**
+    - Last 10 games for home team
+    - Last 10 games for away team
+    - Last 5 head-to-head matches
+    - Season stats (wins/losses/draws)
+    - Home/away performance splits
+  end note
+}
+
+partition "Feature Computation Phase" {
+
+  fork
+    partition "Team Form Features" {
+      :Calculate Home Team Form;
+      note right
+        - Win rate (last 5, 10, 20 games)
+        - Points per game average
+        - Goals scored/conceded rate
+        - Home record specifically
+        - Recent momentum (weighted)
+      end note
+
+      :Calculate Away Team Form;
+      note right
+        - Win rate (last 5, 10, 20 games)
+        - Points per game average
+        - Goals scored/conceded rate
+        - Away record specifically
+        - Recent momentum (weighted)
+      end note
+    }
+
+  fork again
+    partition "Head-to-Head Features" {
+      :Calculate H2H Statistics;
+      note right
+        - Historical win rate for each team
+        - Average goals in H2H matches
+        - Home advantage in H2H
+        - Last meeting result & date
+        - Goal differential in H2H
+      end note
+    }
+
+  fork again
+    partition "Market Odds Features" {
+      :Extract Odds-Based Features;
+      note right
+        - Implied probability from odds
+        - Odds movement (if historical available)
+        - Market consensus (across providers)
+        - Overround calculation
+        - Value indicators
+      end note
+    }
+
+  fork again
+    partition "Contextual Features" {
+      :Calculate Contextual Features;
+      note right
+        - Days since last match (rest)
+        - Time of season (early/mid/late)
+        - Day of week
+        - Time until match start
+        - Home team advantage factor
+      end note
+    }
+
+  fork again
+    partition "Statistical Features" {
+      :Calculate Advanced Stats;
+      note right
+        - Expected goals (xG) metrics
+        - Possession statistics
+        - Shot efficiency
+        - Defensive solidity
+        - Strength of schedule
+      end note
+    }
+
+  end fork
+
+  :Aggregate All Feature Values;
+  note right
+    Combine features into single vector:
+    - 50-200 features typically
+    - Normalized/standardized values
+    - Handle missing values (imputation)
+  end note
+
+  :Apply Feature Transformations;
+  note right
+    **Transformations:**
+    - Normalize numerical features (z-score)
+    - Encode categorical features (one-hot)
+    - Create interaction features
+    - Apply feature scaling
+    - Handle outliers (clipping)
+  end note
+}
+
+partition "Feature Validation Phase" {
+  :Validate Feature Vector;
+  note right
+    **Validation Checks:**
+    - All required features present
+    - No NaN or Inf values
+    - Values within expected ranges
+    - Feature count matches schema
+    - Data types correct
+  end note
+
+  if (Validation Passed?) then (no)
+    :Log Validation Errors;
+    :Apply Fallback Strategy;
+    note right
+      - Use default values
+      - Use previous feature vector
+      - Mark as low confidence
+    end note
+  else (yes)
+    :Validation Successful;
+  endif
+
+  :Version Feature Vector;
+  note right
+    Track feature_version:
+    - Links to feature definitions
+    - Ensures reproducibility
+    - Enables A/B testing
+  end note
+}
+
+partition "Feature Storage Phase" {
+  :Prepare Feature Vector Entity;
+  note right
+    FeatureVector {
+      id, match_id, odds_snapshot_id
+      features (JSONB)
+      feature_version
+      computed_at
+    }
+  end note
+
+  fork
+    :Store in Feature Repository;
+    note right
+      Save to PostgreSQL
+      for quick retrieval
+    end note
+
+  fork again
+    :Cache Feature Vector;
+    note right
+      Cache in Redis with TTL:
+      - Key: feature:{match_id}:{version}
+      - TTL: 1 hour
+      - Quick access for predictions
+    end note
+
+  end fork
+
+  :Log Feature Computation Metrics;
+  note right
+    Track metrics:
+    - Computation time
+    - Feature count
+    - Validation status
+    - Cache hit/miss ratio
+  end note
+}
+
+partition "Post-Computation Actions" {
+  if (Triggered by Prediction Request?) then (yes)
+    :Return Feature Vector to Caller;
+  else (no - batch job)
+    :Continue to Next Match;
+  endif
+
+  if (Export for Training?) then (yes)
+    :Queue for Data Lake Export;
+    note right
+      Append to S3 data lake:
+      - Parquet format
+      - Partitioned by date
+      - Used for model retraining
+    end note
+  endif
+}
+
+stop
+
+@enduml

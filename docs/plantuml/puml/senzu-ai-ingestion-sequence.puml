@@ -1,0 +1,312 @@
+@startuml
+title Senzu AI - Data Ingestion Sequence (Scheduled Job)
+
+participant "Scheduler\n(Cron/Airflow)" as Scheduler
+participant "Ingestion Service" as Ingestion
+participant "Sports Data Provider API" as ProviderAPI
+participant "Match Repository" as MatchRepo
+participant "Odds Repository" as OddsRepo
+participant "Feature Service" as Feature
+participant "Redis Cache" as Cache
+database "PostgreSQL" as DB
+participant "Monitoring" as Monitor
+
+== Job Initialization ==
+Scheduler -> Ingestion: triggerIngestionJob(provider="draftkings", sport="nba")
+activate Ingestion
+
+Ingestion -> DB: INSERT INTO ingestion_jobs\n(job_type='odds', provider='draftkings',\n status='STARTED', started_at=NOW())
+activate DB
+DB --> Ingestion: jobId
+deactivate DB
+
+Ingestion -> Ingestion: initializeProviderClient(provider)
+note right
+  Setup:
+  - API base URL
+  - Authentication credentials
+  - Rate limit configuration
+  - Retry policy
+end note
+
+== Fetch Match Schedule ==
+Ingestion -> ProviderAPI: GET /v1/sports/nba/events?date=today
+activate ProviderAPI
+note right
+  Request headers:
+  - API-Key: {key}
+  - Accept: application/json
+end note
+
+alt API Error (500/502/503)
+  ProviderAPI --> Ingestion: 503 Service Unavailable
+  Ingestion -> Ingestion: waitExponentialBackoff(attempt=1)
+  note right: Wait 2s
+  Ingestion -> ProviderAPI: Retry request
+end
+
+alt Rate Limited (429)
+  ProviderAPI --> Ingestion: 429 Too Many Requests\nRetry-After: 60
+  Ingestion -> Ingestion: wait(60 seconds)
+  Ingestion -> ProviderAPI: Retry request
+end
+
+ProviderAPI --> Ingestion: 200 OK\n{"events": [...]}
+deactivate ProviderAPI
+
+Ingestion -> Ingestion: parseMatchData(response)
+note right
+  Extract:
+  - event_id (external ID)
+  - home_team, away_team
+  - start_time
+  - sport, league
+  - status
+end note
+
+Ingestion -> Ingestion: validateMatchData(matches)
+note right
+  Validate:
+  - Required fields present
+  - Valid date formats
+  - Team IDs exist
+  - No duplicate events
+end note
+
+alt Validation Errors Found
+  Ingestion -> Monitor: logValidationErrors(errors)
+  activate Monitor
+  Monitor --> Ingestion: Logged
+  deactivate Monitor
+  note right
+    Continue with valid records
+    Track error count
+  end note
+end
+
+== Transform & Map Teams ==
+loop for each match
+  Ingestion -> Ingestion: transformMatchData(rawMatch)
+  note right
+    Transform:
+    - external_match_id
+    - Map team names to internal team_id
+    - Convert timestamps to UTC
+    - Standardize status values
+  end note
+
+  Ingestion -> DB: SELECT id FROM teams\nWHERE external_id = ?
+  activate DB
+  DB --> Ingestion: team_id
+  deactivate DB
+
+  alt Team Not Found
+    Ingestion -> DB: INSERT INTO teams\n(sport_id, name, external_id, metadata)
+    activate DB
+    DB --> Ingestion: new team_id
+    deactivate DB
+    note right
+      Auto-create teams
+      if not exists
+    end note
+  end
+end
+
+== Upsert Matches ==
+Ingestion -> DB: BEGIN TRANSACTION
+activate DB
+
+loop for each transformed match
+  Ingestion -> MatchRepo: findByExternalId(external_match_id)
+
+  alt Match Exists
+    MatchRepo -> DB: SELECT * FROM matches\nWHERE external_match_id = ?
+    DB --> MatchRepo: existing match
+    MatchRepo --> Ingestion: Match
+
+    Ingestion -> Ingestion: detectChanges(existing, new)
+    note right
+      Compare:
+      - status change
+      - score update
+      - start_time change
+    end note
+
+    alt Changes Detected
+      Ingestion -> MatchRepo: update(matchId, updates)
+      MatchRepo -> DB: UPDATE matches\nSET status=?, home_score=?, ...\nWHERE id = ?
+      DB --> MatchRepo: Updated match
+      MatchRepo --> Ingestion: Match
+
+      Ingestion -> Cache: delete("match:{matchId}")
+      activate Cache
+      Cache --> Ingestion: OK
+      deactivate Cache
+
+      note right
+        Invalidate cached data
+        for updated match
+      end note
+    end
+
+  else Match Does Not Exist
+    Ingestion -> MatchRepo: create(match)
+    MatchRepo -> DB: INSERT INTO matches\n(sport_id, external_match_id,\n home_team_id, away_team_id, ...)
+    DB --> MatchRepo: New match
+    MatchRepo --> Ingestion: Match
+  end
+end
+
+Ingestion -> DB: COMMIT
+deactivate DB
+
+== Fetch Odds Data ==
+Ingestion -> ProviderAPI: GET /v1/odds?sport=nba
+activate ProviderAPI
+note right
+  Fetch current odds for all markets:
+  - Moneyline
+  - Spread
+  - Totals (Over/Under)
+end note
+
+ProviderAPI --> Ingestion: 200 OK\n{"odds": [...]}
+deactivate ProviderAPI
+
+Ingestion -> Ingestion: parseOddsData(response)
+note right
+  Extract:
+  - event_id (match external ID)
+  - provider name
+  - market type
+  - outcome
+  - odds value
+  - timestamp
+end note
+
+Ingestion -> Ingestion: validateOddsData(odds)
+
+== Transform & Link Odds ==
+loop for each odds entry
+  Ingestion -> Ingestion: transformOddsData(rawOdds)
+  note right
+    Transform:
+    - Convert odds format (American → Decimal)
+    - Standardize market names
+    - Standardize outcome names
+    - Parse timestamp
+  end note
+
+  Ingestion -> MatchRepo: findByExternalId(event_id)
+  activate MatchRepo
+  MatchRepo -> DB: SELECT id FROM matches\nWHERE external_match_id = ?
+  activate DB
+  DB --> MatchRepo: match_id
+  deactivate DB
+  MatchRepo --> Ingestion: match_id
+  deactivate MatchRepo
+
+  alt Match Not Found
+    Ingestion -> Monitor: logWarning("Odds for unknown match")
+    activate Monitor
+    Monitor --> Ingestion: Logged
+    deactivate Monitor
+    note right: Skip this odds entry
+  end
+end
+
+== Bulk Insert Odds ==
+Ingestion -> DB: BEGIN TRANSACTION
+activate DB
+
+Ingestion -> OddsRepo: bulkCreate(oddsSnapshots[])
+note right
+  Batch insert for performance:
+  - Prepare batch of 1000 records
+  - Single INSERT statement
+  - Reduce DB round trips
+end note
+
+OddsRepo -> DB: INSERT INTO odds_snapshots\n(match_id, provider, market, outcome,\n odds, timestamp, raw_data)\nVALUES (?, ?, ...), (?, ?, ...), ...
+DB --> OddsRepo: Inserted count
+OddsRepo --> Ingestion: 1000 records inserted
+
+Ingestion -> DB: COMMIT
+deactivate DB
+
+== Cache Invalidation ==
+Ingestion -> Cache: invalidatePattern("prediction:*")
+activate Cache
+note right
+  Invalidate all prediction caches
+  since odds have changed
+end note
+Cache --> Ingestion: Cleared N keys
+deactivate Cache
+
+== Trigger Feature Computation ==
+Ingestion -> Ingestion: identifyMatchesNeedingFeatures()
+note right
+  Find matches:
+  - New matches without features
+  - Matches with updated odds
+  - Matches starting soon
+end note
+
+loop for each match needing features
+  Ingestion -> Feature: queueFeatureComputation(matchId)
+  activate Feature
+  note right
+    Queue async job:
+    - Don't block ingestion
+    - Process in background
+    - Retry if fails
+  end note
+  Feature --> Ingestion: Queued
+  deactivate Feature
+end
+
+== Job Completion ==
+Ingestion -> DB: UPDATE ingestion_jobs\nSET status='COMPLETED',\n    completed_at=NOW(),\n    records_processed=?,\n    records_failed=?\nWHERE id = ?
+activate DB
+DB --> Ingestion: Updated
+deactivate DB
+
+Ingestion -> Monitor: logIngestionMetrics(metrics)
+activate Monitor
+note right
+  Log metrics:
+  - Total latency
+  - Records processed
+  - API call count
+  - Cache invalidations
+  - Success rate
+end note
+Monitor --> Ingestion: Logged
+deactivate Monitor
+
+Ingestion --> Scheduler: Job completed successfully
+deactivate Ingestion
+
+== Error Handling ==
+alt Fatal Error Occurs
+  Ingestion -> DB: ROLLBACK
+  activate DB
+  DB --> Ingestion: Rolled back
+  deactivate DB
+
+  Ingestion -> DB: UPDATE ingestion_jobs\nSET status='FAILED',\n    completed_at=NOW(),\n    error_log=?\nWHERE id = ?
+  activate DB
+  DB --> Ingestion: Updated
+  deactivate DB
+
+  Ingestion -> Monitor: sendAlert("Ingestion job failed", jobId, error)
+  activate Monitor
+  Monitor --> Ingestion: Alert sent
+  deactivate Monitor
+
+  Ingestion --> Scheduler: Job failed
+  deactivate Ingestion
+end
+
+@enduml

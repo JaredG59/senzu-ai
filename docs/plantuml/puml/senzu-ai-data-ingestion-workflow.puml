@@ -1,0 +1,225 @@
+@startuml
+title Senzu AI - Data Ingestion Workflow
+
+start
+
+:Ingestion Job Triggered;
+note right
+  **Trigger Sources:**
+  - Scheduled cron job (e.g., every 5 minutes)
+  - Manual API trigger
+  - Webhook from data provider
+  - Event-driven (match status change)
+end note
+
+:Create Ingestion Job Record;
+note right
+  Status: STARTED
+  Track job_id, provider, job_type
+end note
+
+partition "Data Fetching Phase" {
+  :Determine Data Source & Endpoints;
+  note right
+    Examples:
+    - Match schedule endpoint
+    - Live odds endpoint
+    - Historical data endpoint
+  end note
+
+  :Build API Request with Auth;
+  note right
+    - Add API key / OAuth token
+    - Set query parameters (sport, date range)
+    - Add rate limiting headers
+  end note
+
+  :Call External Provider API;
+
+  if (HTTP Success?) then (yes)
+    :Parse Response JSON;
+  else (no)
+    :Log API Error;
+    if (Retryable Error?) then (yes)
+      :Wait with Exponential Backoff;
+      note right
+        Retry up to 3 times
+        Backoff: 2s, 4s, 8s
+      end note
+      :Call External Provider API;
+    else (no)
+      :Mark Job as FAILED;
+      :Send Alert to Operations;
+      stop
+    endif
+  endif
+}
+
+partition "Data Validation Phase" {
+  :Validate Response Schema;
+  note right
+    Check for:
+    - Required fields present
+    - Data types correct
+    - Enum values valid
+    - ID formats valid
+  end note
+
+  if (Schema Valid?) then (no)
+    :Log Validation Errors;
+    :Mark Invalid Records;
+    :Continue with Valid Records;
+  else (yes)
+    :All Records Valid;
+  endif
+
+  :Check for Duplicate Records;
+  note right
+    Compare external_match_id
+    or odds timestamp
+  end note
+
+  :Filter Out Duplicates;
+}
+
+partition "Data Transformation Phase" {
+  :Transform Provider Data to Internal Schema;
+  note right
+    **Transformations:**
+    - Map provider team IDs to internal team IDs
+    - Convert odds formats (American → Decimal)
+    - Parse timestamps to UTC
+    - Extract nested JSON fields
+    - Standardize market/outcome names
+  end note
+
+  :Enrich Data with Metadata;
+  note right
+    - Add sport_id from lookup
+    - Link to existing teams
+    - Calculate derived fields
+  end note
+
+  fork
+    :Prepare Match Data;
+    note right
+      Map to Match entity:
+      - external_match_id
+      - home_team_id, away_team_id
+      - start_at, status
+      - metadata (venue, etc.)
+    end note
+  fork again
+    :Prepare Odds Data;
+    note right
+      Map to OddsSnapshot entity:
+      - match_id (from lookup)
+      - provider, market, outcome
+      - odds, timestamp
+      - raw_data
+    end note
+  end fork
+}
+
+partition "Data Persistence Phase" {
+  :Begin Database Transaction;
+
+  fork
+    partition "Upsert Matches" {
+      :Check if Match Exists;
+      if (Match Exists?) then (yes)
+        :Update Match Fields;
+        note right
+          Only update if:
+          - Status changed
+          - Score updated
+          - Start time changed
+        end note
+      else (no)
+        :Insert New Match;
+      endif
+      :Record Match IDs;
+    }
+  fork again
+    partition "Insert Odds Snapshots" {
+      :Bulk Insert Odds Snapshots;
+      note right
+        Use batch insert for performance
+        Typical batch size: 1000 records
+      end note
+    }
+  end fork
+
+  if (Transaction Success?) then (yes)
+    :Commit Transaction;
+    :Mark Job as COMPLETED;
+  else (no)
+    :Rollback Transaction;
+    :Log Database Error;
+    :Mark Job as FAILED;
+  endif
+
+  :Update Job Record;
+  note right
+    Update fields:
+    - status
+    - records_processed
+    - records_failed
+    - completed_at
+    - error_log (if any)
+  end note
+}
+
+partition "Post-Processing Phase" {
+  if (New Matches Inserted?) then (yes)
+    :Trigger Feature Computation;
+    note right
+      Queue async job to compute
+      features for new matches
+    end note
+  endif
+
+  if (New Odds Available?) then (yes)
+    :Invalidate Prediction Cache;
+    note right
+      Clear cached predictions
+      for affected matches
+    end note
+  endif
+
+  :Update Ingestion Metrics;
+  note right
+    Track for monitoring:
+    - Ingestion latency
+    - Success/failure rate
+    - Records per job
+    - Provider availability
+  end note
+}
+
+:Send Success Notification;
+note right
+  Log to monitoring system
+  (Datadog, CloudWatch, etc.)
+
+  **Error Handling Strategy:**
+
+  **Retryable Errors (retry 3x):**
+  - Network timeouts
+  - 429 Rate Limit
+  - 500/502/503 Server errors
+
+  **Non-Retryable Errors (fail immediately):**
+  - 401 Authentication failure
+  - 400 Bad Request
+  - 404 Not Found
+
+  **Partial Failures:**
+  - Continue processing valid records
+  - Log invalid records separately
+  - Report % success rate
+end note
+
+stop
+
+@enduml

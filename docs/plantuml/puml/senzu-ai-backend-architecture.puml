@@ -1,0 +1,53 @@
+@startuml
+title AI-Powered Sports Prediction Dashboard - Backend Architecture
+
+' External systems
+actor "User / Dashboard UI" as User
+actor "Sports Data Provider APIs" as DataProviders
+actor "AI Training Pipeline" as ModelTrainer
+
+' Core system boundary
+package "AI Sports Prediction Backend" {
+    
+    component "API Gateway / Web API" as API
+    component "Auth Service" as Auth
+    component "Inference Service" as Inference
+    component "Feature Service" as Feature
+    component "Model Service" as Model
+    component "Data Ingestion Service" as Ingest
+    component "Prediction Repository" as PredRepo
+    component "Match & Odds Repository" as MatchRepo
+    component "Feature Repository" as FeatureRepo
+    
+    database "PostgreSQL (Relational Store)" as DB
+    database "S3 / Data Lake" as DataLake
+    queue "Redis Cache" as Cache
+}
+
+' External interactions
+User --> API : HTTP Requests (REST/GraphQL)
+DataProviders --> Ingest : Fetch odds & match data (API/JSON)
+ModelTrainer --> Model : Train & deploy model artifacts
+
+' Internal data flow
+API --> Auth : Verify user tokens
+API --> Inference : Request prediction
+Inference --> Feature : Build feature vector
+Feature --> FeatureRepo : Store/Retrieve features
+Inference --> Model : Load model, infer probability
+Model --> DB : Save model metadata/version
+Inference --> PredRepo : Store predictions
+PredRepo --> DB
+MatchRepo --> DB
+FeatureRepo --> DB
+Ingest --> MatchRepo : Upsert matches
+Ingest --> DB : Raw data dump
+Inference --> Cache : Store/retrieve predictions
+Feature --> DataLake : Load historical features (for retraining)
+Model --> Cache : Warm model or store latest model in memory
+
+' Return data
+Inference --> API : Predicted probabilities + EV
+API --> User : JSON Response
+
+@enduml

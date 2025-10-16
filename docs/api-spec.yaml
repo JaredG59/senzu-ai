@@ -1,0 +1,891 @@
+openapi: 3.0.3
+info:
+  title: Senzu AI - Sports Prediction API
+  description: |
+    AI-powered sports prediction backend system that provides probability predictions
+    and expected value (EV) calculations for sports betting markets.
+  version: 1.0.0
+  contact:
+    name: Senzu AI Team
+
+servers:
+  - url: https://api.senzu-ai.com/v1
+    description: Production
+  - url: https://staging-api.senzu-ai.com/v1
+    description: Staging
+  - url: http://localhost:8000/v1
+    description: Local development
+
+tags:
+  - name: Auth
+    description: Authentication and authorization
+  - name: Matches
+    description: Match information and schedules
+  - name: Predictions
+    description: AI-powered predictions and EV calculations
+  - name: Models
+    description: Model management and metadata
+  - name: Sports
+    description: Sports and teams data
+  - name: Odds
+    description: Betting odds data
+
+security:
+  - BearerAuth: []
+
+paths:
+  # ============================================
+  # AUTH ENDPOINTS
+  # ============================================
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Register a new user
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: User created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: Email already exists
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Login user
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Refresh access token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token:
+                  type: string
+      responses:
+        '200':
+          description: Token refreshed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Logout user (revoke tokens)
+      responses:
+        '204':
+          description: Logout successful
+
+  # ============================================
+  # SPORTS ENDPOINTS
+  # ============================================
+  /sports:
+    get:
+      tags: [Sports]
+      summary: List all sports
+      responses:
+        '200':
+          description: List of sports
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Sport'
+
+  /sports/{sportId}/teams:
+    get:
+      tags: [Sports]
+      summary: List teams for a sport
+      parameters:
+        - $ref: '#/components/parameters/SportId'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: List of teams
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedTeamsResponse'
+
+  # ============================================
+  # MATCHES ENDPOINTS
+  # ============================================
+  /matches:
+    get:
+      tags: [Matches]
+      summary: List matches with filters
+      parameters:
+        - name: sport_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [scheduled, in_progress, finished, cancelled]
+        - name: start_date
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: end_date
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: List of matches
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedMatchesResponse'
+
+  /matches/{matchId}:
+    get:
+      tags: [Matches]
+      summary: Get match details
+      parameters:
+        - $ref: '#/components/parameters/MatchId'
+      responses:
+        '200':
+          description: Match details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Match'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ============================================
+  # PREDICTIONS ENDPOINTS
+  # ============================================
+  /matches/{matchId}/predictions:
+    get:
+      tags: [Predictions]
+      summary: Get predictions for a match
+      description: |
+        Returns AI-generated predictions with probabilities and expected value (EV)
+        calculations for various betting markets.
+      parameters:
+        - $ref: '#/components/parameters/MatchId'
+        - name: market
+          in: query
+          description: Filter by specific market (e.g., moneyline, spread, totals)
+          schema:
+            type: string
+        - name: model_version
+          in: query
+          description: Specific model version to use (defaults to active model)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Predictions for the match
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Prediction'
+                  metadata:
+                    type: object
+                    properties:
+                      model_version:
+                        type: string
+                      predicted_at:
+                        type: string
+                        format: date-time
+                      cache_hit:
+                        type: boolean
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /predictions:
+    get:
+      tags: [Predictions]
+      summary: List predictions with filters
+      parameters:
+        - name: match_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: sport_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: market
+          in: query
+          schema:
+            type: string
+        - name: min_ev
+          in: query
+          description: Filter predictions with EV >= this value
+          schema:
+            type: number
+        - name: predicted_after
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: List of predictions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedPredictionsResponse'
+
+  # ============================================
+  # ODDS ENDPOINTS
+  # ============================================
+  /matches/{matchId}/odds:
+    get:
+      tags: [Odds]
+      summary: Get odds snapshots for a match
+      parameters:
+        - $ref: '#/components/parameters/MatchId'
+        - name: provider
+          in: query
+          schema:
+            type: string
+        - name: market
+          in: query
+          schema:
+            type: string
+        - name: latest_only
+          in: query
+          description: Return only the most recent odds
+          schema:
+            type: boolean
+            default: true
+      responses:
+        '200':
+          description: Odds snapshots
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/OddsSnapshot'
+
+  # ============================================
+  # MODELS ENDPOINTS
+  # ============================================
+  /models:
+    get:
+      tags: [Models]
+      summary: List model versions
+      parameters:
+        - name: is_active
+          in: query
+          schema:
+            type: boolean
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: List of models
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ModelRun'
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+
+  /models/{modelId}:
+    get:
+      tags: [Models]
+      summary: Get model details
+      parameters:
+        - name: modelId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Model details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/ModelRun'
+
+  /models/{modelId}/evaluations:
+    get:
+      tags: [Models]
+      summary: Get model evaluation metrics
+      parameters:
+        - name: modelId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Model evaluations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ModelEvaluation'
+
+  /models/{modelId}/backtest:
+    get:
+      tags: [Models]
+      summary: Get backtest results for a model
+      parameters:
+        - name: modelId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Backtest results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/BacktestResult'
+
+# ============================================
+# COMPONENTS
+# ============================================
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    MatchId:
+      name: matchId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    SportId:
+      name: sportId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    Page:
+      name: page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+
+    PageSize:
+      name: page_size
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+
+  schemas:
+    # ============================================
+    # AUTH SCHEMAS
+    # ============================================
+    RegisterRequest:
+      type: object
+      required: [email, password, name]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+        name:
+          type: string
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+
+    AuthResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        token_type:
+          type: string
+          example: Bearer
+        expires_in:
+          type: integer
+          description: Access token expiration in seconds
+        user:
+          $ref: '#/components/schemas/User'
+
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+        name:
+          type: string
+        role:
+          type: string
+          enum: [user, admin]
+        created_at:
+          type: string
+          format: date-time
+
+    # ============================================
+    # SPORTS SCHEMAS
+    # ============================================
+    Sport:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        code:
+          type: string
+          example: nba
+        name:
+          type: string
+          example: Basketball (NBA)
+        created_at:
+          type: string
+          format: date-time
+
+    Team:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        sport_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        external_id:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+
+    # ============================================
+    # MATCH SCHEMAS
+    # ============================================
+    Match:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        sport_id:
+          type: string
+          format: uuid
+        sport:
+          $ref: '#/components/schemas/Sport'
+        external_match_id:
+          type: string
+        home_team:
+          $ref: '#/components/schemas/Team'
+        away_team:
+          $ref: '#/components/schemas/Team'
+        start_at:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [scheduled, in_progress, finished, cancelled]
+        home_score:
+          type: integer
+          nullable: true
+        away_score:
+          type: integer
+          nullable: true
+        metadata:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    # ============================================
+    # PREDICTION SCHEMAS
+    # ============================================
+    Prediction:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        match_id:
+          type: string
+          format: uuid
+        model_run_id:
+          type: string
+          format: uuid
+        market:
+          type: string
+          description: Betting market type
+          example: moneyline
+        outcome:
+          type: string
+          description: Specific outcome within the market
+          example: home_win
+        probability:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          description: Predicted probability (0-1)
+          example: 0.6234
+        expected_value:
+          type: number
+          format: double
+          description: Expected value calculation
+          example: 0.0523
+        confidence_interval_low:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          example: 0.5891
+        confidence_interval_high:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          example: 0.6577
+        metadata:
+          type: object
+          additionalProperties: true
+        predicted_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    # ============================================
+    # ODDS SCHEMAS
+    # ============================================
+    OddsSnapshot:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        match_id:
+          type: string
+          format: uuid
+        provider:
+          type: string
+          example: draftkings
+        market:
+          type: string
+          example: moneyline
+        outcome:
+          type: string
+          example: home_win
+        odds:
+          type: number
+          format: double
+          description: Decimal odds
+          example: 1.75
+        timestamp:
+          type: string
+          format: date-time
+        raw_data:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+
+    # ============================================
+    # MODEL SCHEMAS
+    # ============================================
+    ModelRun:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        version:
+          type: string
+        model_type:
+          type: string
+          example: xgboost
+        artifact_path:
+          type: string
+        hyperparameters:
+          type: object
+          additionalProperties: true
+        metrics:
+          type: object
+          additionalProperties: true
+          example:
+            accuracy: 0.6543
+            log_loss: 0.4321
+            roi: 0.0823
+        is_active:
+          type: boolean
+        deployed_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    ModelEvaluation:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        model_run_id:
+          type: string
+          format: uuid
+        evaluation_type:
+          type: string
+          example: validation
+        metrics:
+          type: object
+          additionalProperties: true
+        evaluation_period_start:
+          type: string
+          format: date-time
+        evaluation_period_end:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    BacktestResult:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        model_run_id:
+          type: string
+          format: uuid
+        backtest_period_start:
+          type: string
+          format: date-time
+        backtest_period_end:
+          type: string
+          format: date-time
+        total_predictions:
+          type: integer
+        accuracy:
+          type: number
+          format: double
+        roi:
+          type: number
+          format: double
+        sharpe_ratio:
+          type: number
+          format: double
+        metrics:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+
+    # ============================================
+    # PAGINATION & COMMON
+    # ============================================
+    Pagination:
+      type: object
+      properties:
+        page:
+          type: integer
+        page_size:
+          type: integer
+        total_pages:
+          type: integer
+        total_count:
+          type: integer
+
+    PaginatedMatchesResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Match'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    PaginatedTeamsResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Team'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    PaginatedPredictionsResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Prediction'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: object
+              additionalProperties: true
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    InternalServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'

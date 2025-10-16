@@ -1,0 +1,332 @@
+@startuml
+title Senzu AI - Detailed Prediction Request Flow
+
+actor "Client / Dashboard" as Client
+participant "API Gateway" as API
+participant "Auth Service" as Auth
+participant "Redis Cache" as Cache
+participant "Inference Service" as Inference
+participant "Feature Service" as Feature
+participant "Match Repository" as MatchRepo
+participant "Odds Repository" as OddsRepo
+participant "Feature Repository" as FeatureRepo
+participant "Model Service" as Model
+participant "Prediction Repository" as PredRepo
+database "PostgreSQL" as DB
+database "S3 / Model Storage" as S3
+
+== Authentication ==
+Client -> API: GET /matches/{matchId}/predictions\nAuthorization: Bearer {token}
+activate API
+
+API -> Auth: verifyToken(accessToken)
+activate Auth
+Auth -> Auth: Validate JWT signature
+Auth -> Auth: Check expiration
+Auth --> API: TokenPayload(userId, role)
+deactivate Auth
+
+alt Invalid Token
+  API --> Client: 401 Unauthorized
+  deactivate API
+end
+
+== Cache Check ==
+API -> Cache: get("prediction:{matchId}:v1")
+activate Cache
+Cache --> API: null (cache miss)
+deactivate Cache
+
+note right of Cache
+  Cache Key Format:
+  prediction:{matchId}:{model_version}
+
+  TTL: 5 minutes
+
+  Invalidated when:
+  - New odds data arrives
+  - Model version changes
+end note
+
+alt Cache Hit
+  Cache --> API: Cached Prediction[]
+  API --> Client: 200 OK\n{predictions}
+  deactivate API
+end
+
+== Prediction Orchestration ==
+API -> Inference: predictForMatch(matchId)
+activate Inference
+
+Inference -> Inference: Log prediction request
+note right: Track request_id, matchId, timestamp
+
+== Feature Building Phase ==
+Inference -> Feature: buildFeatures(matchId, oddsSnapshotId=null)
+activate Feature
+
+Feature -> MatchRepo: findById(matchId)
+activate MatchRepo
+MatchRepo -> DB: SELECT * FROM matches WHERE id = ?
+activate DB
+DB --> MatchRepo: Match record
+deactivate DB
+MatchRepo --> Feature: Match
+deactivate MatchRepo
+
+alt Match Not Found
+  Feature --> Inference: MatchNotFoundException
+  Inference --> API: 404 Not Found
+  API --> Client: 404 Not Found
+  deactivate Inference
+  deactivate API
+end
+
+Feature -> OddsRepo: findLatestByMatch(matchId, markets=["moneyline","spread","totals"])
+activate OddsRepo
+OddsRepo -> DB: SELECT * FROM odds_snapshots\nWHERE match_id = ? \nAND timestamp = (SELECT MAX(timestamp)...)\nGROUP BY market
+activate DB
+DB --> OddsRepo: OddsSnapshot[]
+deactivate DB
+OddsRepo --> Feature: OddsSnapshot[]
+deactivate OddsRepo
+
+alt No Odds Available
+  Feature --> Inference: NoOddsAvailableException
+  Inference --> API: 400 Bad Request\n"No odds data available for this match"
+  API --> Client: 400 Bad Request
+  deactivate Inference
+  deactivate API
+end
+
+Feature -> MatchRepo: findHistoricalMatches(homeTeamId, limit=10)
+activate MatchRepo
+MatchRepo -> DB: SELECT * FROM matches\nWHERE (home_team_id = ? OR away_team_id = ?)\nAND status = 'finished'\nORDER BY start_at DESC\nLIMIT 10
+activate DB
+DB --> MatchRepo: Match[]
+deactivate DB
+MatchRepo --> Feature: Historical matches
+deactivate MatchRepo
+
+Feature -> MatchRepo: findHistoricalMatches(awayTeamId, limit=10)
+activate MatchRepo
+MatchRepo -> DB: [Similar query for away team]
+activate DB
+DB --> MatchRepo: Match[]
+deactivate DB
+MatchRepo --> Feature: Historical matches
+deactivate MatchRepo
+
+Feature -> MatchRepo: findHeadToHead(homeTeamId, awayTeamId, limit=5)
+activate MatchRepo
+MatchRepo -> DB: SELECT * FROM matches\nWHERE (home_team_id = ? AND away_team_id = ?)\n   OR (home_team_id = ? AND away_team_id = ?)\nAND status = 'finished'\nORDER BY start_at DESC\nLIMIT 5
+activate DB
+DB --> MatchRepo: Match[]
+deactivate DB
+MatchRepo --> Feature: H2H matches
+deactivate MatchRepo
+
+Feature -> Feature: computeTeamFormFeatures(homeMatches)
+note right
+  Calculate:
+  - Win rate last 5/10/20
+  - Goals per game
+  - Momentum weighted
+  - Home/away splits
+end note
+
+Feature -> Feature: computeTeamFormFeatures(awayMatches)
+
+Feature -> Feature: computeHeadToHeadFeatures(h2hMatches)
+note right
+  Calculate:
+  - H2H win rates
+  - H2H goal averages
+  - Last meeting result
+end note
+
+Feature -> Feature: computeOddsFeatures(oddsSnapshots)
+note right
+  Calculate:
+  - Implied probabilities
+  - Odds movement (if available)
+  - Market consensus
+  - Overround
+end note
+
+Feature -> Feature: computeContextualFeatures(match)
+note right
+  Calculate:
+  - Days since last match
+  - Season progress
+  - Time until match
+  - Day of week
+end note
+
+Feature -> Feature: aggregateFeatureVector()
+note right
+  Combine all features:
+  - Normalize values
+  - Handle missing data
+  - Apply transformations
+  - Create 72-dim vector
+end note
+
+Feature -> Feature: validateFeatureVector(features)
+note right
+  Validate:
+  - No NaN/Inf values
+  - All required features present
+  - Values in expected ranges
+end note
+
+Feature -> FeatureRepo: create(featureVector)
+activate FeatureRepo
+FeatureRepo -> DB: INSERT INTO feature_vectors\n(match_id, features, feature_version, ...)
+activate DB
+DB --> FeatureRepo: FeatureVector (with id)
+deactivate DB
+FeatureRepo --> Feature: FeatureVector
+deactivate FeatureRepo
+
+Feature -> Cache: set("features:{matchId}:v1", featureVector, ttl=3600)
+activate Cache
+Cache --> Feature: OK
+deactivate Cache
+
+Feature --> Inference: FeatureVector
+deactivate Feature
+
+== Model Inference Phase ==
+Inference -> Model: getActiveModel()
+activate Model
+
+Model -> Cache: get("model:active")
+activate Cache
+Cache --> Model: null (not in cache)
+deactivate Cache
+
+Model -> DB: SELECT * FROM model_runs\nWHERE is_active = true\nORDER BY deployed_at DESC\nLIMIT 1
+activate DB
+DB --> Model: ModelRun metadata
+deactivate DB
+
+Model -> S3: loadModelArtifact(artifactPath)
+activate S3
+S3 --> Model: Model binary/pickle
+deactivate S3
+
+Model -> Model: deserializeModel(artifact)
+note right
+  Load model into memory:
+  - XGBoost, LightGBM, PyTorch, etc.
+  - Validate model structure
+  - Warm up model
+end note
+
+Model -> Cache: set("model:active", model, ttl=3600)
+activate Cache
+Cache --> Model: OK
+deactivate Cache
+
+Model --> Inference: Model
+deactivate Model
+
+Inference -> Model: infer(model, featureVector)
+activate Model
+
+Model -> Model: preprocessFeatures(featureVector)
+note right
+  - Extract feature array
+  - Apply feature scaling
+  - Reshape for model input
+end note
+
+Model -> Model: model.predict_proba(features)
+note right
+  Run ML inference:
+  - Returns probability distribution
+  - Outputs for each outcome class
+  - Confidence intervals
+end note
+
+Model -> Model: calculateConfidenceIntervals(predictions)
+note right
+  Bootstrap or analytical CI:
+  - 95% confidence intervals
+  - Lower and upper bounds
+end note
+
+Model --> Inference: InferenceResult\n{probabilities, confidence_intervals}
+deactivate Model
+
+== Expected Value Calculation ==
+Inference -> Inference: calculateEV(probability, odds)
+note right
+  For each market outcome:
+  EV = (probability * (odds - 1)) - (1 - probability)
+
+  Positive EV indicates value bet
+end note
+
+Inference -> Inference: buildPredictions(inferenceResult, match, model)
+note right
+  Create Prediction objects:
+  - One per market/outcome
+  - Include probability, EV, CI
+  - Add metadata
+end note
+
+== Persistence Phase ==
+loop for each prediction
+  Inference -> PredRepo: create(prediction)
+  activate PredRepo
+  PredRepo -> DB: INSERT INTO predictions\n(match_id, model_run_id, market, outcome,\n probability, expected_value, ...)
+  activate DB
+  DB --> PredRepo: Prediction (with id)
+  deactivate DB
+  PredRepo --> Inference: Prediction
+  deactivate PredRepo
+end
+
+== Caching Phase ==
+Inference -> Cache: set("prediction:{matchId}:v1", predictions[], ttl=300)
+activate Cache
+Cache --> Inference: OK
+deactivate Cache
+
+== Monitoring & Logging ==
+Inference -> Inference: logPredictionMetrics()
+note right
+  Log metrics:
+  - Total latency
+  - Feature build time
+  - Inference time
+  - Cache status
+  - Model version used
+end note
+
+Inference --> API: PredictionResult[]
+deactivate Inference
+
+API -> API: formatResponse(predictions)
+note right
+  Add response metadata:
+  - model_version
+  - predicted_at
+  - cache_hit: false
+end note
+
+API --> Client: 200 OK\n{\n  "data": [predictions],\n  "metadata": {...}\n}
+deactivate API
+
+== Background Tasks ==
+note over Cache, FeatureRepo
+  **Async Post-Processing:**
+  - Update prediction metrics
+  - Queue for model monitoring
+  - Check for significant EV opportunities
+  - Trigger notifications (if configured)
+end note
+
+@enduml

@@ -1,0 +1,291 @@
+@startuml
+title Senzu AI - Model Training & Deployment Flow
+
+actor "ML Engineer" as Engineer
+participant "Training Pipeline\n(Airflow/Prefect)" as Pipeline
+participant "Model Service" as ModelService
+participant "Feature Repository" as FeatureRepo
+participant "Prediction Repository" as PredRepo
+database "S3 Data Lake" as S3
+database "PostgreSQL" as DB
+participant "Redis Cache" as Cache
+participant "Monitoring\n(MLflow/Weights&Biases)" as MLflow
+
+== Training Data Preparation ==
+Engineer -> Pipeline: triggerTrainingJob(config)
+activate Pipeline
+
+Pipeline -> Pipeline: validateConfig(config)
+note right
+  Validate:
+  - Feature version
+  - Training date range
+  - Model type & hyperparameters
+  - Validation strategy
+end note
+
+Pipeline -> FeatureRepo: exportFeaturesForTraining(startDate, endDate)
+activate FeatureRepo
+
+FeatureRepo -> DB: SELECT * FROM feature_vectors\nWHERE computed_at BETWEEN ? AND ?
+activate DB
+DB --> FeatureRepo: FeatureVector[] (recent data)
+deactivate DB
+
+FeatureRepo -> S3: loadHistoricalFeatures(startDate, endDate)
+activate S3
+S3 --> FeatureRepo: Parquet files
+deactivate S3
+
+FeatureRepo -> FeatureRepo: mergeFeatureDatasets()
+FeatureRepo --> Pipeline: TrainingDataset\n(features + labels)
+deactivate FeatureRepo
+
+Pipeline -> PredRepo: fetchActualOutcomes(matchIds)
+activate PredRepo
+PredRepo -> DB: SELECT * FROM matches\nWHERE id IN (?)\nAND status = 'finished'
+activate DB
+DB --> PredRepo: Match results (labels)
+deactivate DB
+PredRepo --> Pipeline: ActualOutcomes[]
+deactivate PredRepo
+
+Pipeline -> Pipeline: joinFeaturesWithLabels()
+note right
+  Create training set:
+  - X: feature vectors
+  - y: actual outcomes (1/0 for win/loss)
+  - Filter matches with no outcome
+end note
+
+== Data Splitting ==
+Pipeline -> Pipeline: splitTrainValidationTest()
+note right
+  Time-based split:
+  - Train: 70% (oldest)
+  - Validation: 15%
+  - Test: 15% (most recent)
+
+  Ensures no data leakage
+end note
+
+== Model Training ==
+Pipeline -> Pipeline: initializeModel(modelType, hyperparameters)
+note right
+  Model types:
+  - XGBoost
+  - LightGBM
+  - Neural Network (PyTorch)
+  - Ensemble
+
+  Hyperparameters from config
+end note
+
+Pipeline -> Pipeline: trainModel(trainData, validationData)
+note right
+  Training process:
+  - Fit model on train set
+  - Validate on validation set
+  - Early stopping if needed
+  - Track metrics per epoch
+end note
+
+Pipeline -> MLflow: logMetrics(trainingMetrics)
+activate MLflow
+note right
+  Log training metrics:
+  - Loss per epoch
+  - Validation accuracy
+  - Learning curves
+  - Training time
+end note
+MLflow --> Pipeline: Logged
+deactivate MLflow
+
+== Model Evaluation ==
+Pipeline -> Pipeline: evaluateModel(testData)
+note right
+  Calculate metrics:
+  - Accuracy
+  - Log loss
+  - Brier score
+  - Calibration curve
+  - ROC AUC
+  - Precision/Recall
+end note
+
+Pipeline -> Pipeline: backtestModel(historicalData)
+note right
+  Simulate betting strategy:
+  - Calculate ROI
+  - Sharpe ratio
+  - Max drawdown
+  - Win rate
+  - Profit curve
+end note
+
+Pipeline -> MLflow: logEvaluationMetrics(metrics)
+activate MLflow
+MLflow --> Pipeline: Logged
+deactivate MLflow
+
+alt Metrics Below Threshold
+  Pipeline -> Engineer: notifyTrainingFailure(metrics)
+  note right
+    Alert if:
+    - Accuracy < 55%
+    - ROI < 0%
+    - Log loss > baseline
+  end note
+  Pipeline --> Engineer: Training failed
+  deactivate Pipeline
+end
+
+== Model Registration ==
+Pipeline -> Pipeline: serializeModel()
+note right
+  Save model artifact:
+  - Pickle/ONNX format
+  - Include preprocessing
+  - Save hyperparameters
+  - Version metadata
+end note
+
+Pipeline -> S3: uploadModelArtifact(model, version)
+activate S3
+S3 --> Pipeline: artifactPath (s3://models/v1.5.0)
+deactivate S3
+
+Pipeline -> MLflow: registerModel(modelMetadata, artifactPath)
+activate MLflow
+note right
+  Register in MLflow:
+  - Model version
+  - Artifact location
+  - Training metrics
+  - Feature version used
+end note
+MLflow --> Pipeline: ModelRegistry entry
+deactivate MLflow
+
+Pipeline -> ModelService: registerModel(modelMetadata, artifactPath)
+activate ModelService
+
+ModelService -> DB: INSERT INTO model_runs\n(name, version, model_type, artifact_path,\n hyperparameters, metrics, is_active=false)
+activate DB
+DB --> ModelService: ModelRun (with id)
+deactivate DB
+
+ModelService --> Pipeline: ModelRun
+deactivate ModelService
+
+Pipeline -> Engineer: notifyTrainingComplete(modelId, metrics)
+
+== Model Evaluation & Review ==
+Engineer -> Engineer: reviewModelMetrics(modelId)
+note right
+  Review:
+  - Test set performance
+  - Backtest results
+  - Calibration curves
+  - Feature importance
+  - Compare to current production model
+end note
+
+alt Performance Not Satisfactory
+  Engineer -> Engineer: tuneHyperparameters()
+  Engineer -> Pipeline: triggerTrainingJob(newConfig)
+end
+
+== Model Deployment ==
+Engineer -> ModelService: activateModel(modelId)
+activate ModelService
+
+ModelService -> DB: BEGIN TRANSACTION
+activate DB
+
+ModelService -> DB: UPDATE model_runs\nSET is_active = false\nWHERE is_active = true
+note right: Deactivate current model
+
+ModelService -> DB: UPDATE model_runs\nSET is_active = true, deployed_at = NOW()\nWHERE id = ?
+note right: Activate new model
+
+ModelService -> DB: COMMIT
+DB --> ModelService: Success
+deactivate DB
+
+ModelService -> Cache: delete("model:active")
+activate Cache
+note right: Invalidate cached model
+Cache --> ModelService: OK
+deactivate Cache
+
+ModelService -> Cache: invalidatePattern("prediction:*")
+activate Cache
+note right: Clear all prediction caches
+Cache --> ModelService: Cleared
+deactivate Cache
+
+ModelService -> S3: loadModelArtifact(artifactPath)
+activate S3
+S3 --> ModelService: Model artifact
+deactivate S3
+
+ModelService -> ModelService: warmModelInMemory()
+note right
+  Pre-load model:
+  - Deserialize artifact
+  - Load to memory/GPU
+  - Run test inference
+  - Cache in Redis
+end note
+
+ModelService -> Cache: set("model:active", model, ttl=7200)
+activate Cache
+Cache --> ModelService: OK
+deactivate Cache
+
+ModelService -> DB: INSERT INTO model_evaluations\n(model_run_id, evaluation_type='deployment',\n metrics, evaluation_period_start/end)
+activate DB
+note right
+  Log deployment event
+end note
+DB --> ModelService: EvaluationRecord
+deactivate DB
+
+ModelService --> Engineer: Model activated successfully
+deactivate ModelService
+
+== Post-Deployment Monitoring ==
+Engineer -> MLflow: configureModelMonitoring(modelId)
+activate MLflow
+note right
+  Setup monitoring:
+  - Prediction distribution tracking
+  - Feature drift detection
+  - Performance degradation alerts
+  - A/B test configuration (if applicable)
+end note
+MLflow --> Engineer: Monitoring configured
+deactivate MLflow
+
+Engineer -> Engineer: documentDeployment()
+note right
+  Document:
+  - Model version deployed
+  - Training data range
+  - Performance metrics
+  - Deployment date
+  - Rollback procedure
+end note
+
+== Background Evaluation ==
+note over Pipeline, MLflow
+  **Continuous Monitoring:**
+  - Daily: Check prediction accuracy vs actual results
+  - Weekly: Recompute ROI and Sharpe ratio
+  - Monitor: Feature drift, prediction distribution
+  - Alert: If performance drops below threshold
+end note
+
+@enduml
